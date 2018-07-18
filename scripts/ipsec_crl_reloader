@@ -1,0 +1,67 @@
+#!/usr/local/bin/python
+# -*- coding: utf-8 -*-
+# SPDX-License-Identifier: LGPL-2.1-or-later
+# Copyright © 2008-2018 ANSSI. All Rights Reserved.
+#
+# Watch the IPsec CRL directory for modifications (files that are
+# moved to, created or modified in the directory). When modification is
+# detected, launch the reload command 'ipsec rereadcrls'.
+# Copyright 2014 ANSSI
+# Author: Hugo Chargois <clipos@ssi.gouv.fr>
+#
+# Distributed under the terms of the GNU Lesser General Public License v2.1
+
+import pyinotify
+from threading import Timer, Lock
+import subprocess
+import syslog
+
+syslog.openlog(ident="IPSECCRL", facility=syslog.LOG_DAEMON)
+
+WATCHED_DIR = "/etc/admin/ike2/crl"
+WATCHED_EVENTS = (pyinotify.IN_MODIFY
+                  | pyinotify.IN_ATTRIB
+                  | pyinotify.IN_MOVED_TO
+                  | pyinotify.IN_CREATE)
+
+def action():
+    syslog.syslog("Modification in the CRL directory detected, "
+                  "launching 'ipsec rereadcrls' command to reload CRLs...")
+    ret = subprocess.check_call(["/usr/sbin/ipsec", "rereadcrls"])
+    if ret == 0:
+        syslog.syslog("'ipsec rereadcrls' exited successfully.")
+    else:
+        syslog.syslog(syslog.LOG_ERR,
+                      "'ipsec rereadcrls' exited with an error.")
+
+
+# I wrote this to be thread-safe for reusability, I don't think that
+# pyinotify calls the callbacks in threads here. Still, can't hurt.
+class DelayHandler(pyinotify.ProcessEvent):
+    """Waits for a single event, then starts a timer during which
+    all further events are ignored. After 'delay' seconds,
+    a single 'action' is executed, regardless of how many events
+    were received during the timer. The cycle can then start again."""
+    def __init__(self, action, delay=5):
+        self.action = action
+        self.delay = delay
+        self._timer = None
+        self._timer_lock = Lock()
+
+    def process_default(self, event):
+        with self._timer_lock:
+            if not self._timer or not self._timer.is_alive():
+                self._timer = Timer(self.delay, self.action)
+                self._timer.start()
+
+
+try:
+    wm = pyinotify.WatchManager()
+    notifier = pyinotify.Notifier(wm, DelayHandler(action))
+    wm.add_watch(WATCHED_DIR, WATCHED_EVENTS)
+    syslog.syslog("IPsec CRL reloading daemon started.")
+    notifier.loop()
+except pyinotify.PyinotifyError as err:
+    syslog.syslog(syslog.LOG_ERR, repr(err))
+finally:
+    syslog.syslog("IPsec CRL reloading daemon stopped.")

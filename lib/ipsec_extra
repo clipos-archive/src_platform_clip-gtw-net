@@ -1,0 +1,54 @@
+# SPDX-License-Identifier: LGPL-2.1-or-later
+# Copyright © 2008-2018 ANSSI. All Rights Reserved.
+# Copyright 2009 SGDN/DCSSI
+# Copyright 2010-2013 SGDSN/ANSSI
+# Author: Vincent Strubel <clipos@ssi.gouv.fr>
+# Distributed under the terms of the GNU Lesser General Public License v2.1
+
+config_extra() {
+	import_conf_noerr "${NET_FILE}" "${NET_MULTI_FILTER}" "CLIENT_NETWORKS" 2>/dev/null
+	if [[ $? -ne 0 ]]; then
+		ewarn "CLIENT_NETWORKS not found, trying CLIENT_NETWORK for compatibility"
+		import_conf_noerr "${NET_FILE}" "${NET_IMPORT_FILTER}" "CLIENT_NETWORK" \
+			|| return 1
+		export CLIENT_NETWORKS="${CLIENT_NETWORK}"
+	fi
+
+	if [[ "${ADMIN_GTW}" == "yes" ]]; then
+		import_conf_noerr "${NET_FILE}" "${NET_MULTI_FILTER}" "ADMIN_TARGETS" 2>/dev/null
+	fi
+
+	# Optional dynamic addresses
+	import_conf_noerr "${NET_FILE}" "yes" "DYNAMIC_CLIENT_IPS" 2>/dev/null
+
+	# Optional peer
+	import_conf_noerr "${NET_FILE}" "${ADDR_MULTI_FILTER}" "PEER_ADDR" 2>/dev/null
+	if [[ -n "${PEER_ADDR}" ]]; then
+		import_conf_noerr "${NET_FILE}" "${NET_MULTI_FILTER}" "UPDATE_TARGETS" 2>/dev/null
+	fi
+
+	# Do we use gov or civ crypto?
+	import_conf_noerr "${IPSEC_FILE}" "yes" IPSEC_CIVIL_CRYPTO || true
+}
+
+start_extra() {
+	if [[ -c "/dev/leds/start" ]]; then
+		einfo "Setting up 'started' led"
+		echo "1" > "/dev/leds/start"
+	fi
+
+	if ps aux | grep -v grep | grep -q ipsec_list_clients; then
+		einfo "Not starting ipsec_list_clients - already running"
+	else
+		einfo "Starting up ipsec_list_clients"
+		(nohup /sbin/ipsec_list_clients /var/log/ipsec_clients responder 1>/dev/null 2>/dev/null) &
+	fi
+
+	if ps aux | grep -v grep | grep -q ipsec_crl_reloader; then
+		einfo "Not starting ipsec_crl_reloader - already running"
+	else
+		einfo "Starting up ipsec_crl_reloader"
+		(nohup /sbin/ipsec_crl_reloader 1>/dev/null 2>/dev/null) &
+	fi
+}
+

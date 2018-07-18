@@ -1,0 +1,24 @@
+# SPDX-License-Identifier: LGPL-2.1-or-later
+# Copyright © 2008-2018 ANSSI. All Rights Reserved.
+# Copyright 2011 SGDSN/ANSSI
+# Author: Vincent Strubel <clipos@ssi.gouv.fr>
+# Distributed under the terms of the GNU Lesser General Public License v2.1
+
+# We always set the default profile when booting a gateway
+BOOT_MENU="no"
+BOOT_LASTUSED="no"
+
+# Set up ADMIN port based on profile var on FOO board.
+resolvconf_extra() {
+	if [[ -c "/dev/leds/admin" ]]; then
+		ADMIN_PORT_ENABLED="no"
+		import_conf_noerr "${NET_FILE}" "yes|no" "ADMIN_PORT_ENABLED" 2>/dev/null
+		if [[ "${ADMIN_PORT_ENABLED}" == "yes" ]]; then
+			einfo "Activating admin port"
+			echo -n 1 > "/dev/leds/admin"
+		else
+			einfo "Admin port is disabled with this profile"
+			echo -n 0 > "/dev/leds/admin"
+		fi
+	fi
+}

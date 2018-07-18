@@ -1,0 +1,138 @@
+#!/sbin/runscript
+# SPDX-License-Identifier: LGPL-2.1-or-later
+# Copyright © 2008-2018 ANSSI. All Rights Reserved.
+# Copyright 2008-2009 SGDN/DCSSI
+# Copyright 2010-2013 SGDSN/ANSSI
+# Author: Vincent Strubel <clipos@ssi.gouv.fr>
+# Distributed under the terms of the GNU Lesser General Public License v2.1
+
+EXTRA_IMPORT_MULTIPORT="FWD_IN_TCP FWD_IN_UDP"
+EXTRA_IMPORT_SAME="FWD_IN_SAME_TCP FWD_IN_SAME_UDP"
+EXTRA_IMPORT_ADMIN="ADMIN_TARGETS ADMIN_NETWORKS"
+EXTRA_YESNO="FWD_IN_PING SNAT_CLIENT_NETWORKS"
+
+
+# eth0 <=> EXT_IF
+# eth1 <=> INT_IF
+
+# Allow the gateway to send ICMP error messages on its internal (cleartext)
+# interface => needed for PMTU discovery.
+ETH1_IN="yes"
+
+netfilter_config_extra() {
+	import_conf_noerr "${NETFILTER_FILE}" "${MULTIPORT_IMPORT_FILTER}" \
+						${EXTRA_IMPORT_MULTIPORT} \
+				|| return 1
+	import_conf_noerr "${NETFILTER_FILE}" "${SAME_IMPORT_FILTER}" \
+						${EXTRA_IMPORT_SAME}\
+				|| return 1
+
+	import_conf_all "${NETFILTER_FILE}" "yes|no" ${EXTRA_YESNO}
+	
+	# Optional peer
+	import_conf_noerr "${NET_FILE}" "${ADDR_MULTI_FILTER}" "PEER_ADDR" 2>/dev/null
+	if [[ -n "${PEER_ADDR}" ]]; then
+		import_conf_noerr "${NET_FILE}" "${NET_MULTI_FILTER}" "UPDATE_TARGETS" 2>/dev/null
+	fi
+
+	import_conf_noerr "${NET_FILE}" "${NET_MULTI_FILTER}" "CLIENT_NETWORKS" 2>/dev/null
+
+	if [[ $? -ne 0 ]]; then
+		ewarn "CLIENT_NETWORKS not found, trying CLIENT_NETWORK for compatibility"
+		import_conf_noerr "${NET_FILE}" "${NET_IMPORT_FILTER}" "CLIENT_NETWORK" \
+			|| return 1
+		export CLIENT_NETWORKS="${CLIENT_NETWORK}"
+	fi
+
+	if [[ "${ADMIN_GTW}" == "yes" ]]; then
+		import_conf_noerr "${NET_FILE}" "${NET_MULTI_FILTER}" $EXTRA_IMPORT_ADMIN 2>/dev/null
+	fi
+}
+
+netfilter_init_extra() {
+	# Force internal network encapsulation on external interface
+	force_ipsec_if "eth0" "! ${ETH0_ADDR}" "${ETH0_ADDR}" || return 1
+
+	if [[ -n "${PEER_ADDR}" ]]; then
+		pass_ipsec_if "eth0" "${ETH0_ADDR}" "${PEER_ADDR}" || return 1
+	else
+		pass_ipsec_if "eth0" "${ETH0_ADDR}" "-" || return 1
+	fi
+	# SNAT all decrypted client packets on cleartext interface
+	if [[ "${SNAT_CLIENT_NETWORKS}" == "yes" ]]; then
+		snat_cleartext_forward "eth0" "eth1" "${ETH1_ADDR}" "0x100" \
+			|| return 1
+	fi
+}
+
+netfilter_start_extra() {
+	# NEW from eth0 to eth1 + ESTABLISHED
+	if [[ -n "${ADMIN_NETWORKS}" ]]; then 
+		declare -A PASS_ARGS
+		PASS_ARGS["out_tcp"]="22,23"
+		create_stateless_chains "out" "fwadmin" \
+				|| return 1
+		unset PASS_ARGS
+		
+		pass_icmp "out" "fwadmin"
+
+		_finish_stateless_chains "fwadmin" || return 1
+
+		for src in ${ADMIN_NETWORKS}; do
+			for dst in ${ADMIN_TARGETS}; do
+				plug_stateless_chains "eth1" "eth0" "fwadmin" \
+					"forward" "${src}" "${dst}" || return 1
+			done
+		done
+	fi
+
+	if [[ -n "${UPDATE_TARGETS}" ]]; then 
+		# Allow HTTPS, DNS and NTP in from update targets
+		declare -A PASS_ARGS
+		PASS_ARGS["in_tcp"]="443"
+		PASS_ARGS["in_udp"]="53"
+		PASS_ARGS["in_udpsame"]="123"
+		create_stateless_chains "in" "fwupdate" 	  \
+			|| return 1
+		unset PASS_ARGS
+		pass_icmp "in" "fwupdate"
+
+		_finish_stateless_chains "fwupdate" || return 1
+
+		for dst in ${UPDATE_TARGETS}; do
+			plug_stateless_chains "eth1" "eth0" "fwupdate" \
+				"forward" "-" "${dst}" || return 1
+		done
+	fi
+
+	declare -A PASS_ARGS
+	local dir=""
+	setup_pass_args_in "FWD"
+	if [[ -n "${PEER_ADDR}" ]]; then
+		# Peer-to-peer config : either client network can initiate connections
+		setup_pass_args_out "FWD"
+		dir="inout"
+	else
+		# Pure responder gateway : only remote clients initiate connections
+		dir="in"
+	fi
+
+	create_stateless_chains "${dir}" "forward" \
+		|| return 1
+	unset PASS_ARGS
+
+	if [[ "${FWD_IN_PING}" == "yes" ]]; then 
+		pass_ping "${dir}" "forward" || return 1
+	fi
+
+	# Allow icmp error messages in relevant directions, even for
+	# the responder gateway
+	pass_icmp "${dir}" "forward" || return 1
+
+	_finish_stateless_chains "forward" || return 1
+
+	for remote in ${CLIENT_NETWORKS}; do
+		plug_stateless_chains "eth1" "eth0" "forward" \
+			"forward" "-" "${remote}" || return 1
+	done
+}

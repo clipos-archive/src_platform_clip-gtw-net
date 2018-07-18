@@ -1,0 +1,323 @@
+# clip-noccsd ipsec.conf
+
+# To use all the gateway features, four certificates (or symlinks) are needed:
+# - gw: used by responders to receive clients or peers connections
+# - update: to connect to the Update gateway
+# - admin: to connect to the Admin gateway
+# - audit: to connect to the Audit gateway
+#
+# To identify x509 remote connection(s) you can set variables in /etc/conf.d/ipsec:
+# {CLIENT,PEER,{UPDATE,ADMIN,AUDIT}_GW}_{CA,ID}
+# They must match the certificate DN (with "*" as jocker value) or the
+# certificate subjectAltName (extension).
+#
+# CLIENT_{CA,ID} must match PEER_{CA,ID} as well (to be able to accept other
+# connections than peers).
+#
+# You must set {ADMIN,AUDIT}_NAME (subjectAltName in the gw.pem certificate,
+# e.g. @admin.clip @audit.clip) to be able to differentiate multiple
+# responders. They must match the {ADMIN,AUDIT}_GW_ID configuration of their
+# clients.
+
+cat >"${output_file}" <<EOF
+
+config setup
+	charondebug="dmn 1,mgr 1,ike 2,chd 1,job 1,cfg 2,knl 1,net 1,enc 1,lib 1"
+	# Force Unique IDs, may be useful with MobIKE
+	uniqueids=replace
+	strictcrlpolicy=no
+
+# Default connection
+conn %default
+	# Left is the local GTW
+	left=${ETH0_ADDR}
+	keyexchange=ikev2
+	authby=rsasig
+	keylife=4h
+	ikelifetime=15h
+	rekeymargin=10m
+	keyingtries=2
+	mobike=no
+	fragmentation=yes
+	rekey=yes
+	# Crypto
+	esp=aes256-sha256-ecp384,aes256-sha256-modp4096!
+	ike=aes256-sha256-ecp384,aes256-sha256-modp4096!
+	# Re-test idle connection every hour
+	dpddelay=1h
+	# Clear dead connections
+	dpdaction=clear
+
+EOF
+
+####################
+#       Peer       #
+####################
+
+STANDARD_CLIENTS="$(echo "${CLIENT_NETWORKS}" | sed -e 's/ /,/g')"
+if [[ -n "${ADMIN_TARGETS}" ]]; then
+	ALL_CLIENTS="$(echo "${CLIENT_NETWORKS} ${ADMIN_TARGETS}" | sed -e 's/ /,/g')"
+else
+	ALL_CLIENTS="$(echo "${CLIENT_NETWORKS}" | sed -e 's/ /,/g')"
+fi
+
+if [[ -n "${UPDATE_TARGETS}" ]]; then
+	ALL_CLIENTS="$(echo "${ALL_CLIENTS} ${UPDATE_TARGETS}" | sed -e 's/ /,/g')"
+fi
+
+ADMIN_CLIENTS="$(echo "${ADMIN_TARGETS}" | sed -e 's/ /,/g')"
+
+if [[ -n "${PEER_ADDR}" ]]; then
+	let "num=0"
+	[ -n "${PEER_CA}" ] && rightca="rightca=\"${PEER_CA}\"" || rightca=""
+	[ -n "${PEER_ID}" ] && rightid="rightid=\"${PEER_ID}\"" || rightid="rightid=%any"
+
+	for addr in ${PEER_ADDR}; do
+		cat >>"${output_file}" <<EOF
+
+conn peer${num}
+	leftsubnet=0.0.0.0/0
+	leftcert=gw.pem
+	right=${addr}
+	rightsubnet=${STANDARD_CLIENTS}
+	# Peer DNs, if any
+	${rightca}
+	${rightid}
+	dpddelay=30s
+	dpdaction=restart
+	auto=add
+
+EOF
+		let "num+=1"
+	done
+	echo "peer" >> "${gw_list}"
+fi
+
+####################
+#   UPDATE section #
+####################
+
+if [ -z "${UPDATE_NOIPSEC}" -a -n "${UPDATE_GW}" ]; then
+	let "num=0"
+	subnet="leftsubnet=${UPDATE_ADDR}/32"
+	updown=""
+	if [[ "${UPDATE_ADDR}" == "virtual" ]]; then
+		subnet="leftsourceip=%config"
+		updown="leftupdown=/sbin/ipsec-updown"
+	fi
+	[ -n "${UPDATE_GW_CA}" ] && rightca="rightca=\"${UPDATE_GW_CA}\"" || rightca=""
+	[ -n "${UPDATE_GW_ID}" ] && rightid="rightid=\"${UPDATE_GW_ID}\"" || rightid="rightid=%any"
+
+	for addr in ${UPDATE_GW}; do
+		cat >>"${output_file}" <<EOF
+
+# Connection used for GTW update
+conn gw_update${num}
+	# Left is the local GTW
+	${subnet}
+	leftcert=update.pem
+	# Right is the update server
+	right=${addr}
+	rightsubnet=0.0.0.0/0
+	# Update gateway DNs, if any
+	${rightca}
+	${rightid}
+	dpddelay=60s
+	dpdaction=restart
+	auto=add
+	${updown}
+
+EOF
+		let "num+=1"
+	done
+	echo "gw_update" >> "${gw_list}"
+fi
+
+####################
+#   ADMIN section  #
+####################
+
+if [ -n "${ADMIN_GW}" -a -n "${ADMIN_ADDR}" ] ; then
+	let "num=0"
+	subnet="leftsubnet=${ADMIN_ADDR}/32"
+	updown=""
+	if [[ "${ADMIN_ADDR}" == "virtual" ]]; then
+		subnet="leftsourceip=%config"
+		updown="leftupdown=/sbin/ipsec-updown"
+	fi
+	[ -n "${ADMIN_GW_CA}" ] && rightca="rightca=\"${ADMIN_GW_CA}\"" || rightca=""
+	[ -n "${ADMIN_GW_ID}" ] && rightid="rightid=\"${ADMIN_GW_ID}\"" || rightid="rightid=%any"
+
+	for addr in ${ADMIN_GW}; do
+		cat >>"${output_file}" <<EOF
+
+conn gw_admin${num}
+	# Left is the local GTW
+	${subnet}
+	leftcert=admin.pem
+	# Right is the admin server
+	right=${addr}
+	rightsubnet=0.0.0.0/0
+	# Admin gateway DNs, if any
+	${rightca}
+	${rightid}
+	dpddelay=30s
+	dpdaction=restart
+	auto=add
+	${updown}
+
+EOF
+		let "num+=1"
+	done
+	echo "gw_admin" >> "${gw_list}"
+fi
+
+
+if [ -n "${AUDIT_GW}" -a -n "${AUDIT_ADDR}" ] ; then
+	let "num=0"
+	subnet="leftsubnet=${AUDIT_ADDR}/32"
+	updown=""
+	if [[ "${AUDIT_ADDR}" == "virtual" ]]; then
+		subnet="leftsourceip=%config"
+		updown="leftupdown=/sbin/ipsec-updown"
+	fi
+	[ -n "${AUDIT_GW_CA}" ] && rightca="rightca=\"${AUDIT_GW_CA}\"" || rightca=""
+	[ -n "${AUDIT_GW_ID}" ] && rightid="rightid=\"${AUDIT_GW_ID}\"" || rightid="rightid=%any"
+
+	for addr in ${AUDIT_GW}; do
+		cat >>"${output_file}" <<EOF
+
+conn gw_audit${num}
+	# Left is the local GTW
+	${subnet}
+	leftcert=audit.pem
+	# Right is the audit server
+	right=${addr}
+	rightsubnet=0.0.0.0/0
+	# Audit gateway DNs, if any
+	${rightca}
+	${rightid}
+	dpddelay=30s
+	dpdaction=restart
+	auto=add
+	${updown}
+
+EOF
+		let "num+=1"
+	done
+	echo "gw_audit" >> "${gw_list}"
+fi
+
+####################
+#   Responder      #
+####################
+
+[ -n "${CLIENT_CA}" ] && rightca="rightca=\"${CLIENT_CA}\"" || rightca=""
+[ -n "${CLIENT_ID}" ] && rightid="rightid=\"${CLIENT_ID}\"" || rightid="rightid=%any"
+
+# Note : do not add 'responder' to ${gw_list} : it is
+# supposed to be started by the peer
+
+if [[ -n "${PEER_ADDR}" ]]; then
+	let "num=0"
+
+	# If we have specific peers, limit the responder
+	# connections to their public addresses
+	for addr in ${PEER_ADDR}; do
+		cat >>"${output_file}" <<EOF
+
+conn responder${num}
+	leftsubnet=0.0.0.0/0
+	leftcert=gw.pem
+	right=${addr}
+	rightsubnet=${ALL_CLIENTS}
+	# Peer DNs, if any
+	${rightca}
+	${rightid}
+	# MobIKE connection
+	mobike=yes
+	# ESP port forwarding for gateway
+	nat_redirection=yes
+	dpddelay=180s
+	dpdaction=clear
+	auto=add
+
+EOF
+		let "num+=1"
+	done
+else
+	if [[ "${DYNAMIC_CLIENT_IPS}" == "yes" ]]; then
+		rightnet="rightsourceip"
+		# We only support a single dynamic pool
+		ADMIN_CLIENTS="${ADMIN_CLIENTS%%,*}"
+		STANDARD_CLIENTS="${STANDARD_CLIENTS%%,*}"
+	else
+		rightnet="rightsubnet"
+	fi
+
+	# All other clients (RM_H, UPDATE) go into the default responder
+	# connection
+	cat >>"${output_file}" <<EOF
+conn responder
+	# Left is the local GTW
+	leftsubnet=0.0.0.0/0
+	leftcert=gw.pem
+	# Right are the roadwarriors
+	right=%any
+	${rightnet}=${STANDARD_CLIENTS}
+	# Clients DNs, if any
+	${rightca}
+	${rightid}
+	# MobIKE connection
+	mobike=yes
+	# ESP port forwarding for gateway
+	nat_redirection=yes
+	dpddelay=180s
+	dpdaction=clear
+	auto=add
+
+EOF
+
+	if [[ -n "${ADMIN_TARGETS}" ]]; then
+
+		if [ -n "${ADMIN_NAME}" ]; then
+			cat >>"${output_file}" <<EOF
+conn responder-admin
+	leftsubnet=0.0.0.0/0
+	leftcert=gw.pem
+	leftid="${ADMIN_NAME}"
+	right=%any
+	${rightnet}=${ADMIN_CLIENTS}
+	# clients DNs, if any
+	${rightca}
+	${rightid}
+	# ESP port forwarding for gateway
+	nat_redirection=yes
+	dpddelay=180s
+	dpdaction=clear
+	auto=add
+
+EOF
+		fi
+
+		if [ -n "${AUDIT_NAME}" ]; then
+			cat >>"${output_file}" <<EOF
+conn responder-audit
+	leftsubnet=0.0.0.0/0
+	leftcert=gw.pem
+	leftid="${AUDIT_NAME}"
+	right=%any
+	${rightnet}=${ADMIN_CLIENTS}
+	# clients DNs, if any
+	${rightca}
+	${rightid}
+	# ESP port forwarding for gateway
+	nat_redirection=yes
+	dpddelay=180s
+	dpdaction=clear
+	auto=add
+
+EOF
+		fi
+	fi
+fi
